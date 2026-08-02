@@ -1,0 +1,60 @@
+name: Check stable Mihomo tag every 2 days
+
+on:
+  schedule:
+    - cron: "17 3 */2 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: mihomo-stable-tag-check
+  cancel-in-progress: false
+
+env:
+  BASELINE_TAG: v1.19.29
+  RELEASE_REVISION: r1
+
+jobs:
+  detect:
+    name: Detect one new stable tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      latest_tag: ${{ steps.detect.outputs.latest_tag }}
+      should_build: ${{ steps.detect.outputs.should_build }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Query official MetaCubeX latest stable Release
+        id: detect
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p auto-check-logs
+          python3 scripts/detect_latest.py 2>&1 | tee auto-check-logs/detect.txt
+      - name: Upload detection log
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: auto-check-logs-${{ github.run_id }}
+          path: auto-check-logs/
+          if-no-files-found: warn
+          retention-days: 7
+
+  build:
+    needs: detect
+    if: needs.detect.outputs.should_build == 'true'
+    uses: ./.github/workflows/build-tag.yml
+    with:
+      upstream_tag: ${{ needs.detect.outputs.latest_tag }}
+      release_revision: r1
+      publish_release: true
+    permissions:
+      contents: write
+      issues: write
