@@ -1,0 +1,208 @@
+name: Test Mihomo v1.19.29 Baseline
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-baseline-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-baseline:
+    name: Verify baseline ZIP
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    env:
+      BASELINE_ZIP: mihomo-1.19.29.zip
+      LOG_DIR: logs
+
+    steps:
+      - name: 01 - Initialize logs
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:LOG_DIR" | Out-Null
+
+          @"
+          Mihomo baseline verification
+          Started UTC: $([DateTime]::UtcNow.ToString("o"))
+          Workflow run ID: $env:GITHUB_RUN_ID
+          Workflow run URL: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID
+          Repository: $env:GITHUB_REPOSITORY
+          Commit SHA: $env:GITHUB_SHA
+          Runner OS: $env:RUNNER_OS
+          "@ | Set-Content -Encoding utf8 "$env:LOG_DIR/full-build.log"
+
+      - name: 02 - Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 03 - Record environment
+        if: always()
+        shell: pwsh
+        run: |
+          @"
+
+          ===== BUILD ENVIRONMENT =====
+          Date UTC: $([DateTime]::UtcNow.ToString("o"))
+          PowerShell: $($PSVersionTable.PSVersion)
+          OS: $([System.Environment]::OSVersion.VersionString)
+          Architecture: $env:PROCESSOR_ARCHITECTURE
+          Workspace: $env:GITHUB_WORKSPACE
+          Baseline ZIP: $env:BASELINE_ZIP
+          "@ | Tee-Object -FilePath "$env:LOG_DIR/full-build.log" -Append
+
+      - name: 04 - Verify and extract baseline
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          try {
+            $zipPath = Join-Path "$env:GITHUB_WORKSPACE" "$env:BASELINE_ZIP"
+            $extractPath = Join-Path "$env:RUNNER_TEMP" "mihomo-baseline"
+
+            @"
+
+            ===== VERIFY BASELINE ZIP =====
+            ZIP path: $zipPath
+            Extract path: $extractPath
+            "@ | Tee-Object -FilePath "$env:LOG_DIR/full-build.log" -Append
+
+            if (-not (Test-Path -LiteralPath "$zipPath")) {
+              throw "E04_BASELINE_NOT_FOUND: Không tìm thấy $env:BASELINE_ZIP"
+            }
+
+            $zipInfo = Get-Item -LiteralPath "$zipPath"
+            $zipHash = Get-FileHash -LiteralPath "$zipPath" -Algorithm SHA256
+
+            "ZIP size: $($zipInfo.Length) bytes" |
+              Tee-Object -FilePath "$env:LOG_DIR/full-build.log" -Append
+
+            "ZIP SHA256: $($zipHash.Hash)" |
+              Tee-Object -FilePath "$env:LOG_DIR/full-build.log" -Append
+
+            if (Test-Path -LiteralPath "$extractPath") {
+              Remove-Item -LiteralPath "$extractPath" -Recurse -Force
+            }
+
+            New-Item -ItemType Directory -Force -Path "$extractPath" | Out-Null
+
+            Expand-Archive `
+              -LiteralPath "$zipPath" `
+              -DestinationPath "$extractPath" `
+              -Force
+
+            $goMod = Get-ChildItem `
+              -LiteralPath "$extractPath" `
+              -Recurse `
+              -File `
+              -Filter "go.mod" |
+              Sort-Object { $_.FullName.Length } |
+              Select-Object -First 1
+
+            if (-not $goMod) {
+              throw "E05_GO_MOD_NOT_FOUND: ZIP đã giải nén nhưng không tìm thấy go.mod"
+            }
+
+            $sourceRoot = Split-Path -Parent "$goMod.FullName"
+            $goSum = Join-Path "$sourceRoot" "go.sum"
+
+            "Source root: $sourceRoot" |
+              Tee-Object -FilePath "$env:LOG_DIR/full-build.log" -Append
+
+            "go.mod: $($goMod.FullName)" |
+              Tee-Object -FilePath "$env:LOG_DIR/full-build.log" -Append
+
+            if (-not (Test-Path -LiteralPath "$goSum")) {
+              throw "E06_GO_SUM_NOT_FOUND: Không tìm thấy go.sum cạnh go.mod"
+            }
+
+            $goModHash = Get-FileHash "$($goMod.FullName)" -Algorithm SHA256
+            $goSumHash = Get-FileHash "$goSum" -Algorithm SHA256
+
+            "go.mod SHA256: $($goModHash.Hash)" |
+              Tee-Object -FilePath "$env:LOG_DIR/full-build.log" -Append
+
+            "go.sum SHA256: $($goSumHash.Hash)" |
+              Tee-Object -FilePath "$env:LOG_DIR/full-build.log" -Append
+
+            @"
+            Baseline: $env:BASELINE_ZIP
+            ZIP SHA256: $($zipHash.Hash)
+            Source root: $sourceRoot
+            go.mod: FOUND
+            go.sum: FOUND
+            Verification: PASS
+            "@ | Set-Content -Encoding utf8 "$env:LOG_DIR/baseline-report.txt"
+
+          }
+          catch {
+            @"
+
+            ===== FAILURE =====
+            Error: $($_.Exception.Message)
+            File: $($_.InvocationInfo.ScriptName)
+            Line: $($_.InvocationInfo.ScriptLineNumber)
+            Command: $($_.InvocationInfo.Line)
+            Exit code: 1
+            "@ | Tee-Object -FilePath "$env:LOG_DIR/full-build.log" -Append
+
+            @"
+            Baseline: $env:BASELINE_ZIP
+            Verification: FAIL
+            Error: $($_.Exception.Message)
+            Line: $($_.InvocationInfo.ScriptLineNumber)
+            Exit code: 1
+            "@ | Set-Content -Encoding utf8 "$env:LOG_DIR/baseline-report.txt"
+
+            throw
+          }
+
+      - name: 05 - Create summary
+        if: always()
+        shell: pwsh
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          $report = ""
+
+          if (Test-Path "$env:LOG_DIR/baseline-report.txt") {
+            $report = Get-Content "$env:LOG_DIR/baseline-report.txt" -Raw
+          }
+          else {
+            $report = "Không tạo được baseline-report.txt"
+          }
+
+          @"
+          MIHOMO BASELINE SUMMARY
+
+          Baseline: $env:BASELINE_ZIP
+          Job status: $env:JOB_STATUS
+          Commit SHA: $env:GITHUB_SHA
+          Workflow run ID: $env:GITHUB_RUN_ID
+          Workflow run URL: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID
+
+          $report
+          "@ | Set-Content -Encoding utf8 "$env:LOG_DIR/summary.txt"
+
+          @"
+
+          ===== FINAL STATUS =====
+          Job status: $env:JOB_STATUS
+          Completed UTC: $([DateTime]::UtcNow.ToString("o"))
+          "@ | Add-Content -Encoding utf8 "$env:LOG_DIR/full-build.log"
+
+      - name: 06 - Upload downloadable logs
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-v1.19.29-logs-${{ github.run_id }}
+          path: |
+            logs/summary.txt
+            logs/full-build.log
+            logs/baseline-report.txt
+          if-no-files-found: warn
+          retention-days: 7
