@@ -41,7 +41,7 @@ concurrency:
 
 env:
   BASELINE_TAG: v1.19.29
-  PATCH_REVISION: hybrid-4profiles-v6-auto-r1
+  PATCH_REVISION: hybrid-4profiles-v6-auto-r2-go126
   UPSTREAM_TAG: ${{ inputs.upstream_tag }}
   RELEASE_REVISION: ${{ inputs.release_revision }}
   GOTOOLCHAIN: local
@@ -89,23 +89,34 @@ jobs:
           fi
           exit "$rc"
 
-      - name: Set up Go from upstream go.mod
+      - name: Set up MetaCubeX Go 1.26
         id: setup_go
         if: always()
         continue-on-error: true
         uses: actions/setup-go@v7
         with:
-          go-version-file: source/go.mod
+          go-version: "1.26"
           go-download-base-url: https://github.com/MetaCubeX/go/releases/download/build
           cache: false
 
-      - name: Record setup-go outcome in downloadable diagnostics
+      - name: Verify Go 1.26 and record setup outcome
         if: always()
         shell: bash
         run: |
-          if [[ "${{ steps.setup_go.outcome }}" == success ]]; then rc=0; else rc=1; fi
+          set +e
+          actual_go="$(go version 2>&1)"
+          rc=0
+          if [[ "${{ steps.setup_go.outcome }}" != success ]]; then
+            rc=1
+          elif [[ "$actual_go" != *"go1.26"* ]]; then
+            rc=1
+          fi
           echo "$rc" > ci-logs/status/setup-go.exit
-          echo "setup_go_outcome=${{ steps.setup_go.outcome }}" | tee -a ci-logs/full-build.log ci-logs/diagnostics/setup-go.txt
+          {
+            echo "setup_go_outcome=${{ steps.setup_go.outcome }}"
+            echo "expected_go=go1.26"
+            echo "actual_go=$actual_go"
+          } | tee -a ci-logs/full-build.log ci-logs/diagnostics/setup-go.txt
 
       - name: 02 — Record Go environment
         if: always()
