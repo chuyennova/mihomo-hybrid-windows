@@ -14,6 +14,7 @@ on:
         required: false
         type: boolean
         default: true
+
   workflow_dispatch:
     inputs:
       upstream_tag:
@@ -51,8 +52,10 @@ jobs:
     name: Patch, test and compile
     runs-on: ubuntu-latest
     timeout-minutes: 75
+
     outputs:
       candidate_name: ${{ steps.names.outputs.candidate_name }}
+
     steps:
       - name: Checkout overlay builder only
         uses: actions/checkout@v6
@@ -66,6 +69,7 @@ jobs:
           set -Eeuo pipefail
           mkdir -p ci-logs/{steps,diagnostics,status}
           : > ci-logs/full-build.log
+
           {
             echo "upstream_tag=$UPSTREAM_TAG"
             echo "baseline_tag=$BASELINE_TAG"
@@ -73,6 +77,7 @@ jobs:
             echo "run_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo "started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } | tee -a ci-logs/full-build.log
+
           echo "BUILDER_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           echo "LOG_ROOT=$GITHUB_WORKSPACE/ci-logs" >> "$GITHUB_ENV"
 
@@ -84,9 +89,11 @@ jobs:
           set +e
           bash scripts/ci_run.sh clone-upstream bash scripts/clone_upstream.sh
           rc=$?
+
           if [[ -f source/.upstream-commit ]]; then
             echo "UPSTREAM_COMMIT=$(cat source/.upstream-commit)" >> "$GITHUB_ENV"
           fi
+
           exit "$rc"
 
       - name: Set up MetaCubeX Go 1.26
@@ -104,80 +111,113 @@ jobs:
         shell: bash
         run: |
           set +e
+
           actual_go="$(go version 2>&1)"
           rc=0
-          if [[ "${{ steps.setup_go.outcome }}" != success ]]; then
+
+          if [[ "${{ steps.setup_go.outcome }}" != "success" ]]; then
             rc=1
           elif [[ "$actual_go" != *"go1.26"* ]]; then
             rc=1
           fi
+
           echo "$rc" > ci-logs/status/setup-go.exit
+
           {
             echo "setup_go_outcome=${{ steps.setup_go.outcome }}"
             echo "expected_go=go1.26"
             echo "actual_go=$actual_go"
-          } | tee -a ci-logs/full-build.log ci-logs/diagnostics/setup-go.txt
+          } | tee -a \
+            ci-logs/full-build.log \
+            ci-logs/diagnostics/setup-go.txt
 
       - name: 02 — Record Go environment
         if: always()
         continue-on-error: true
         shell: bash
         working-directory: source
-        run: bash "$BUILDER_ROOT/scripts/ci_run.sh" go-environment bash "$BUILDER_ROOT/overlay/hybrid-v6/tools/hybrid/steps/environment.sh"
+        run: >
+          bash "$BUILDER_ROOT/scripts/ci_run.sh"
+          go-environment
+          bash "$BUILDER_ROOT/overlay/hybrid-v6/tools/hybrid/steps/environment.sh"
 
       - name: 03 — Apply minimal core patch
         if: always()
         continue-on-error: true
         shell: bash
-        run: bash scripts/ci_run.sh apply-core-patch bash scripts/apply_core_patch.sh source
+        run: >
+          bash scripts/ci_run.sh
+          apply-core-patch
+          bash scripts/apply_core_patch.sh source
 
       - name: 04 — Add required Windows modules without replacing upstream go.mod
         if: always()
         continue-on-error: true
         shell: bash
-        run: bash scripts/ci_run.sh prepare-modules bash scripts/prepare_modules.sh source
+        run: >
+          bash scripts/ci_run.sh
+          prepare-modules
+          bash scripts/prepare_modules.sh source
 
       - name: 05 — Verify patched source and dependency locks
         if: always()
         continue-on-error: true
         shell: bash
         working-directory: source
-        run: bash "$BUILDER_ROOT/scripts/ci_run.sh" source-verify bash tools/hybrid/steps/source_verify.sh
+        run: >
+          bash "$BUILDER_ROOT/scripts/ci_run.sh"
+          source-verify
+          bash tools/hybrid/steps/source_verify.sh
 
       - name: 06 — Resolve and vendor dependencies
         if: always()
         continue-on-error: true
         shell: bash
         working-directory: source
-        run: bash "$BUILDER_ROOT/scripts/ci_run.sh" vendor bash tools/hybrid/steps/vendor.sh
+        run: >
+          bash "$BUILDER_ROOT/scripts/ci_run.sh"
+          vendor
+          bash tools/hybrid/steps/vendor.sh
 
       - name: 07 — Apply exact hybrid vendor transformations
         if: always()
         continue-on-error: true
         shell: bash
         working-directory: source
-        run: bash "$BUILDER_ROOT/scripts/ci_run.sh" apply-vendor-patch python3 tools/hybrid/apply_hybrid.py --root .
+        run: >
+          bash "$BUILDER_ROOT/scripts/ci_run.sh"
+          apply-vendor-patch
+          python3 tools/hybrid/apply_hybrid.py --root .
 
       - name: 08 — Gofmt patched files
         if: always()
         continue-on-error: true
         shell: bash
         working-directory: source
-        run: bash "$BUILDER_ROOT/scripts/ci_run.sh" gofmt bash tools/hybrid/steps/gofmt.sh
+        run: >
+          bash "$BUILDER_ROOT/scripts/ci_run.sh"
+          gofmt
+          bash tools/hybrid/steps/gofmt.sh
 
       - name: 09 — Verify all four profiles after patching
         if: always()
         continue-on-error: true
         shell: bash
         working-directory: source
-        run: bash "$BUILDER_ROOT/scripts/ci_run.sh" verify-patch python3 tools/hybrid/apply_hybrid.py --root . --verify-only
+        run: >
+          bash "$BUILDER_ROOT/scripts/ci_run.sh"
+          verify-patch
+          python3 tools/hybrid/apply_hybrid.py --root . --verify-only
 
       - name: 10 — Targeted tests
         if: always()
         continue-on-error: true
         shell: bash
         working-directory: source
-        run: bash "$BUILDER_ROOT/scripts/ci_run.sh" tests bash tools/hybrid/steps/tests.sh
+        run: >
+          bash "$BUILDER_ROOT/scripts/ci_run.sh"
+          tests
+          bash tools/hybrid/steps/tests.sh
 
       - name: 11 — Compile verge-mihomo.exe
         if: always()
@@ -189,28 +229,42 @@ jobs:
           GOOS: windows
           GOARCH: amd64
           GOAMD64: v2
-        run: bash "$BUILDER_ROOT/scripts/ci_run.sh" compile bash tools/hybrid/steps/compile.sh
+        run: >
+          bash "$BUILDER_ROOT/scripts/ci_run.sh"
+          compile
+          bash tools/hybrid/steps/compile.sh
 
       - name: 12 — Download and verify Wintun amd64
         if: always()
         continue-on-error: true
         shell: bash
         working-directory: source
-        run: bash "$BUILDER_ROOT/scripts/ci_run.sh" wintun bash tools/hybrid/steps/wintun.sh
+        run: >
+          bash "$BUILDER_ROOT/scripts/ci_run.sh"
+          wintun
+          bash tools/hybrid/steps/wintun.sh
 
       - name: 13 — Static PE smoke test
         if: always()
         continue-on-error: true
         shell: bash
         working-directory: source
-        run: bash "$BUILDER_ROOT/scripts/ci_run.sh" linux-smoke python3 "$BUILDER_ROOT/scripts/verify_pe.py" dist/verge-mihomo.exe dist/wintun.dll
+        run: >
+          bash "$BUILDER_ROOT/scripts/ci_run.sh"
+          linux-smoke
+          python3 "$BUILDER_ROOT/scripts/verify_pe.py"
+          dist/verge-mihomo.exe
+          dist/wintun.dll
 
       - name: 14 — Package fixed runtime filenames
         if: always()
         continue-on-error: true
         shell: bash
         working-directory: source
-        run: bash "$BUILDER_ROOT/scripts/ci_run.sh" package bash tools/hybrid/steps/package.sh
+        run: >
+          bash "$BUILDER_ROOT/scripts/ci_run.sh"
+          package
+          bash tools/hybrid/steps/package.sh
 
       - name: Evaluate build gate
         id: gate
@@ -240,7 +294,8 @@ jobs:
         id: names
         if: steps.gate.outcome == 'success'
         shell: bash
-        run: echo "candidate_name=hybrid-candidate-${UPSTREAM_TAG}-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "candidate_name=hybrid-candidate-${UPSTREAM_TAG}-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
 
       - name: Upload temporary release candidate
         if: steps.gate.outcome == 'success'
@@ -270,10 +325,13 @@ jobs:
     needs: build
     runs-on: windows-latest
     timeout-minutes: 15
+
     steps:
       - name: Initialize Windows smoke logs
         shell: pwsh
-        run: New-Item -ItemType Directory -Force windows-logs | Out-Null
+        run: |
+          New-Item -ItemType Directory -Force -Path 'windows-logs' | Out-Null
+          New-Item -ItemType File -Force -Path 'windows-logs/windows-smoke.log' | Out-Null
 
       - name: Download release candidate
         id: candidate_download
@@ -291,21 +349,88 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $log = 'windows-logs/windows-smoke.log'
+
           try {
-            $exe = (Get-ChildItem candidate -Recurse -Filter verge-mihomo.exe | Select-Object -First 1).FullName
-            $dll = (Get-ChildItem candidate -Recurse -Filter wintun.dll | Select-Object -First 1).FullName
-            if (-not $exe -or -not $dll) { throw 'E41_WINDOWS_SMOKE: missing EXE or DLL' }
-            Copy-Item $dll (Join-Path (Split-Path $exe) 'wintun.dll') -Force
-            "exe=$exe`ndll=$dll" | Tee-Object -FilePath $log
+            if ('${{ steps.candidate_download.outcome }}' -ne 'success') {
+              throw 'E40_CANDIDATE_DOWNLOAD: release candidate artifact could not be downloaded'
+            }
+
+            $exeItem = Get-ChildItem `
+              -Path 'candidate' `
+              -Recurse `
+              -File `
+              -Filter 'verge-mihomo.exe' |
+              Select-Object -First 1
+
+            $dllItem = Get-ChildItem `
+              -Path 'candidate' `
+              -Recurse `
+              -File `
+              -Filter 'wintun.dll' |
+              Select-Object -First 1
+
+            if ($null -eq $exeItem -or $null -eq $dllItem) {
+              throw 'E41_WINDOWS_SMOKE: missing verge-mihomo.exe or wintun.dll'
+            }
+
+            $exe = [System.IO.Path]::GetFullPath($exeItem.FullName)
+            $sourceDll = [System.IO.Path]::GetFullPath($dllItem.FullName)
+            $targetDll = [System.IO.Path]::GetFullPath(
+              (Join-Path (Split-Path -Parent $exe) 'wintun.dll')
+            )
+
+            $sameDllPath = [System.StringComparer]::OrdinalIgnoreCase.Equals(
+              $sourceDll,
+              $targetDll
+            )
+
+            if (-not $sameDllPath) {
+              Copy-Item `
+                -LiteralPath $sourceDll `
+                -Destination $targetDll `
+                -Force
+            }
+
+            $dll = $targetDll
+
+            @(
+              "exe=$exe"
+              "source_dll=$sourceDll"
+              "runtime_dll=$dll"
+              "dll_copy_required=$(-not $sameDllPath)"
+            ) | Tee-Object -FilePath $log
+
             $handle = [System.Runtime.InteropServices.NativeLibrary]::Load($dll)
-            if ($handle -eq [IntPtr]::Zero) { throw 'E42_WINTUN_DLL: NativeLibrary.Load returned zero' }
-            [System.Runtime.InteropServices.NativeLibrary]::Free($handle)
-            'wintun_load=PASS' | Tee-Object -FilePath $log -Append
-            & $exe -v 2>&1 | Tee-Object -FilePath $log -Append
-            if ($LASTEXITCODE -ne 0) { throw "E41_WINDOWS_SMOKE: verge-mihomo.exe -v exit=$LASTEXITCODE" }
-            'exe_version=PASS' | Tee-Object -FilePath $log -Append
-          } catch {
-            ($_ | Out-String) | Tee-Object -FilePath $log -Append
+
+            if ($handle -eq [IntPtr]::Zero) {
+              throw 'E42_WINTUN_DLL: NativeLibrary.Load returned zero'
+            }
+
+            try {
+              'wintun_load=PASS' |
+                Tee-Object -FilePath $log -Append
+            }
+            finally {
+              [System.Runtime.InteropServices.NativeLibrary]::Free($handle)
+            }
+
+            $versionOutput = & $exe -v 2>&1
+            $versionExitCode = $LASTEXITCODE
+
+            $versionOutput |
+              Tee-Object -FilePath $log -Append
+
+            if ($versionExitCode -ne 0) {
+              throw "E41_WINDOWS_SMOKE: verge-mihomo.exe -v exit=$versionExitCode"
+            }
+
+            'exe_version=PASS' |
+              Tee-Object -FilePath $log -Append
+          }
+          catch {
+            ($_ | Out-String) |
+              Tee-Object -FilePath $log -Append
+
             exit 1
           }
 
@@ -322,14 +447,19 @@ jobs:
       - name: Preserve Windows smoke result
         if: always() && steps.smoke.outcome != 'success'
         shell: pwsh
-        run: exit 1
+        run: |
+          Write-Error 'Windows smoke test failed. Download the windows-smoke-logs artifact.'
+          exit 1
 
   release:
     name: Publish GitHub Release
-    needs: [build, windows-smoke]
-    if: inputs.publish_release
+    needs:
+      - build
+      - windows-smoke
+    if: ${{ inputs.publish_release }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
     steps:
       - name: Initialize release logs
         shell: bash
@@ -353,25 +483,56 @@ jobs:
         run: |
           set -Eeuo pipefail
           mkdir -p release-logs
+
+          if [[ "${{ steps.release_download.outcome }}" != "success" ]]; then
+            echo "E60_RELEASE_DOWNLOAD: verified candidate could not be downloaded" |
+              tee release-logs/release.log
+            exit 1
+          fi
+
           release_tag="hybrid-${UPSTREAM_TAG}-${RELEASE_REVISION}"
+
+          exe_file="$(find dist -type f -name 'verge-mihomo.exe' -print -quit)"
+          dll_file="$(find dist -type f -name 'wintun.dll' -print -quit)"
+          license_file="$(find dist -type f -name 'LICENSE-wintun.txt' -print -quit)"
+          sums_file="$(find dist -type f -name 'SHA256SUMS.txt' -print -quit)"
+          info_file="$(find dist -type f -name 'build-info.json' -print -quit)"
           zip_file="$(find dist -type f -name "verge-mihomo-${UPSTREAM_TAG}-hybrid-windows-amd64.zip" -print -quit)"
+
+          for required_file in \
+            "$exe_file" \
+            "$dll_file" \
+            "$license_file" \
+            "$sums_file" \
+            "$info_file" \
+            "$zip_file"
+          do
+            if [[ -z "$required_file" || ! -f "$required_file" ]]; then
+              echo "E60_RELEASE_UPLOAD: required Release asset is missing" |
+                tee -a release-logs/release.log
+              exit 1
+            fi
+          done
+
           cat > release-notes.txt <<NOTES
           Mihomo upstream: ${UPSTREAM_TAG}
           Hybrid patch: ${PATCH_REVISION}
           Windows amd64: verge-mihomo.exe + wintun.dll
           Workflow: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
           NOTES
+
           gh release create "$release_tag" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Mihomo ${UPSTREAM_TAG} hybrid 4 profiles ${RELEASE_REVISION}" \
             --notes-file release-notes.txt \
-            "$(find dist -type f -name verge-mihomo.exe -print -quit)#verge-mihomo.exe" \
-            "$(find dist -type f -name wintun.dll -print -quit)#wintun.dll" \
-            "$(find dist -type f -name LICENSE-wintun.txt -print -quit)#LICENSE-wintun.txt" \
-            "$(find dist -type f -name SHA256SUMS.txt -print -quit)#SHA256SUMS.txt" \
-            "$(find dist -type f -name build-info.json -print -quit)#build-info.json" \
+            "${exe_file}#verge-mihomo.exe" \
+            "${dll_file}#wintun.dll" \
+            "${license_file}#LICENSE-wintun.txt" \
+            "${sums_file}#SHA256SUMS.txt" \
+            "${info_file}#build-info.json" \
             "${zip_file}#verge-mihomo-${UPSTREAM_TAG}-hybrid-windows-amd64.zip" \
-            2>&1 | tee release-logs/release.log
+            2>&1 |
+            tee release-logs/release.log
 
       - name: Upload release logs
         if: always()
@@ -386,14 +547,20 @@ jobs:
       - name: Preserve release result
         if: always() && steps.publish.outcome != 'success'
         shell: bash
-        run: exit 1
+        run: |
+          echo "Release publishing failed. Download the release-logs artifact."
+          exit 1
 
   issue-state:
     name: Record failure once and block repeated auto retries
-    needs: [build, windows-smoke, release]
+    needs:
+      - build
+      - windows-smoke
+      - release
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
+
     steps:
       - name: Checkout issue helper
         uses: actions/checkout@v6
@@ -410,8 +577,9 @@ jobs:
           RELEASE_RESULT: ${{ needs.release.result }}
           PUBLISH_RELEASE: ${{ inputs.publish_release }}
         run: |
-          if [[ "$BUILD_RESULT" == success && "$WINDOWS_RESULT" == success ]] && \
-             { [[ "$PUBLISH_RELEASE" != true ]] || [[ "$RELEASE_RESULT" == success ]]; }; then
+          if [[ "$BUILD_RESULT" == "success" && "$WINDOWS_RESULT" == "success" ]] && \
+             { [[ "$PUBLISH_RELEASE" != "true" ]] || [[ "$RELEASE_RESULT" == "success" ]]; }
+          then
             echo "BUILD_OUTCOME=success" >> "$GITHUB_ENV"
             BUILD_OUTCOME=success python3 scripts/manage_issue.py
           else
