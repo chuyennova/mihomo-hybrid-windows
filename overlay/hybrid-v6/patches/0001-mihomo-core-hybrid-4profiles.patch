@@ -1,0 +1,802 @@
+diff --git a/adapter/outbound/wireguard.go b/adapter/outbound/wireguard.go
+index b875eda9d4fb9eef66b846f549919661acd9da1b..d34a1e75f663fb4338381eef52fb99c2f47f93bd 100644
+--- a/adapter/outbound/wireguard.go
++++ b/adapter/outbound/wireguard.go
+@@ -42,12 +42,18 @@ type WireGuard struct {
+ 	tunDevice wireguard.Device
+ 	resolver  resolver.Resolver
+ 
+-	initOk        atomic.Bool
+-	initMutex     sync.Mutex
+-	initErr       error
+-	option        WireGuardOption
+-	connectAddr   M.Socksaddr
+-	localPrefixes []netip.Prefix
++	initOk         atomic.Bool
++	closed         atomic.Bool
++	initMutex      sync.Mutex
++	initErr        error // permanent until profile reload (for example invalid IPC configuration)
++	deviceErr      error // transient Wintun creation error, retried with per-outbound backoff
++	deviceRetryAt  time.Time
++	deviceBackoff  time.Duration
++	option         WireGuardOption
++	connectAddr    M.Socksaddr
++	localPrefixes  []netip.Prefix
++	mtu            uint32
++	networkProfile string
+ 
+ 	serverAddrMap   map[M.Socksaddr]netip.AddrPort
+ 	serverAddrTime  atomic.TypedValue[time.Time]
+@@ -63,6 +69,7 @@ type WireGuardOption struct {
+ 	PrivateKey          string `proxy:"private-key"`
+ 	Workers             int    `proxy:"workers,omitempty"`
+ 	MTU                 int    `proxy:"mtu,omitempty"`
++	NetworkProfile      string `proxy:"network-profile,omitempty"`
+ 	UDP                 bool   `proxy:"udp,omitempty"`
+ 	PersistentKeepalive int    `proxy:"persistent-keepalive,omitempty"`
+ 
+@@ -164,7 +171,41 @@ func (option WireGuardOption) Prefixes() ([]netip.Prefix, error) {
+ 	return localPrefixes, nil
+ }
+ 
++const (
++	wireGuardProfileWindows = "windows"
++	wireGuardProfileMacOS   = "macos"
++	wireGuardProfileLinux   = "linux"
++	wireGuardProfileAndroid = "android"
++)
++
++func normalizeWireGuardNetworkProfile(profile string) (string, error) {
++	switch strings.ToLower(strings.TrimSpace(profile)) {
++	case "", wireGuardProfileWindows:
++		return wireGuardProfileWindows, nil
++	case wireGuardProfileMacOS:
++		return wireGuardProfileMacOS, nil
++	case wireGuardProfileLinux:
++		return wireGuardProfileLinux, nil
++	case wireGuardProfileAndroid:
++		return wireGuardProfileAndroid, nil
++	default:
++		return "", E.New("invalid network-profile ", profile, "; expected windows, macos, linux or android")
++	}
++}
++
++func defaultWireGuardMTU(profile string) int {
++	if profile == wireGuardProfileAndroid {
++		return 1360
++	}
++	return 1408
++}
++
+ func NewWireGuard(option WireGuardOption) (*WireGuard, error) {
++	profile, err := normalizeWireGuardNetworkProfile(option.NetworkProfile)
++	if err != nil {
++		return nil, err
++	}
++	option.NetworkProfile = profile
+ 	outbound := &WireGuard{
+ 		Base: NewBase(BaseOption{
+ 			Name:         option.Name,
+@@ -198,7 +239,6 @@ func NewWireGuard(option WireGuardOption) (*WireGuard, error) {
+ 	}
+ 	outbound.bind = wireguard.NewClientBind(context.Background(), wgSingErrorHandler{outbound.Name()}, singDialer, isConnect, outbound.connectAddr.AddrPort(), reserved)
+ 
+-	var err error
+ 	outbound.localPrefixes, err = option.Prefixes()
+ 	if err != nil {
+ 		return nil, err
+@@ -256,32 +296,21 @@ func NewWireGuard(option WireGuardOption) (*WireGuard, error) {
+ 		}
+ 	}
+ 	outbound.option = option
++	outbound.networkProfile = profile
+ 
+ 	mtu := option.MTU
+ 	if mtu == 0 {
+-		mtu = 1408
++		mtu = defaultWireGuardMTU(profile)
+ 	}
+ 	if len(outbound.localPrefixes) == 0 {
+ 		return nil, E.New("missing local address")
+ 	}
+-	outbound.tunDevice, err = wireguard.NewStackDevice(outbound.localPrefixes, uint32(mtu))
+-	if err != nil {
+-		return nil, E.Cause(err, "create WireGuard device")
+-	}
+-	logger := &device.Logger{
+-		Verbosef: func(format string, args ...interface{}) {
+-			log.SingLogger.Debug(fmt.Sprintf("[WG](%s) %s", option.Name, fmt.Sprintf(format, args...)))
+-		},
+-		Errorf: func(format string, args ...interface{}) {
+-			log.SingLogger.Error(fmt.Sprintf("[WG](%s) %s", option.Name, fmt.Sprintf(format, args...)))
+-		},
+-	}
+-	if option.AmneziaWGOption != nil {
+-		outbound.bind.SetParseReserved(false) // AmneziaWG don't need parse reserved
+-		outbound.device = amnezia.NewDevice(outbound.tunDevice, outbound.bind, logger, option.Workers)
+-	} else {
+-		outbound.device = device.NewDevice(outbound.tunDevice, outbound.bind, logger, option.Workers)
+-	}
++	// Defer Wintun/WireGuard device creation until the first real connection.
++	// Clash Verge validates profiles with `mihomo -t` in a normal user process.
++	// Creating a Wintun adapter while merely parsing the configuration makes
++	// validation fail with ERROR_ACCESS_DENIED. Lazy creation keeps `-t`
++	// side-effect free, while the elevated runtime/service creates the adapter.
++	outbound.mtu = uint32(mtu)
+ 
+ 	var has6 bool
+ 	for _, address := range outbound.localPrefixes {
+@@ -308,6 +337,81 @@ func NewWireGuard(option WireGuardOption) (*WireGuard, error) {
+ 	return outbound, nil
+ }
+ 
++const (
++	wireGuardDeviceRetryMin = time.Second
++	wireGuardDeviceRetryMax = 30 * time.Second
++)
++
++// ensureDeviceLocked lazily creates only this outbound's selected network
++// stack and WireGuard device. The caller must hold initMutex. No global lock
++// or shared device is used, so one profile cannot affect another outbound.
++func (w *WireGuard) ensureDeviceLocked() error {
++	if w.closed.Load() {
++		return net.ErrClosed
++	}
++	if w.tunDevice != nil && w.device != nil {
++		return nil
++	}
++
++	now := time.Now()
++	if w.deviceErr != nil && now.Before(w.deviceRetryAt) {
++		return w.deviceErr
++	}
++
++	tunDevice, err := newWireGuardTunDevice(w.option, w.localPrefixes, w.mtu)
++	if err != nil {
++		w.deviceErr = E.Cause(err, "create WireGuard device")
++		if w.deviceBackoff == 0 {
++			w.deviceBackoff = wireGuardDeviceRetryMin
++		} else {
++			w.deviceBackoff *= 2
++			if w.deviceBackoff > wireGuardDeviceRetryMax {
++				w.deviceBackoff = wireGuardDeviceRetryMax
++			}
++		}
++		w.deviceRetryAt = now.Add(w.deviceBackoff)
++		return w.deviceErr
++	}
++
++	logger := &device.Logger{
++		Verbosef: func(format string, args ...interface{}) {
++			log.SingLogger.Debug(fmt.Sprintf("[WG](%s) %s", w.option.Name, fmt.Sprintf(format, args...)))
++		},
++		Errorf: func(format string, args ...interface{}) {
++			log.SingLogger.Error(fmt.Sprintf("[WG](%s) %s", w.option.Name, fmt.Sprintf(format, args...)))
++		},
++	}
++
++	w.tunDevice = tunDevice
++	if w.option.AmneziaWGOption != nil {
++		w.bind.SetParseReserved(false) // AmneziaWG doesn't need reserved parsing.
++		w.device = amnezia.NewDevice(w.tunDevice, w.bind, logger, w.option.Workers)
++	} else {
++		w.device = device.NewDevice(w.tunDevice, w.bind, logger, w.option.Workers)
++	}
++	w.deviceErr = nil
++	w.deviceRetryAt = time.Time{}
++	w.deviceBackoff = 0
++	return nil
++}
++
++// closeDeviceLocked closes only this outbound's device. device.Close also
++// closes the underlying TUN; the direct TUN close is only a partial-init guard.
++func (w *WireGuard) closeDeviceLocked() error {
++	if w.device != nil {
++		w.device.Close()
++		w.device = nil
++		w.tunDevice = nil
++		return nil
++	}
++	if w.tunDevice != nil {
++		err := w.tunDevice.Close()
++		w.tunDevice = nil
++		return err
++	}
++	return nil
++}
++
+ func (w *WireGuard) resolve(ctx context.Context, address M.Socksaddr) (netip.AddrPort, error) {
+ 	if address.Addr.IsValid() {
+ 		return address.AddrPort(), nil
+@@ -331,12 +435,20 @@ func (w *WireGuard) init(ctx context.Context) error {
+ }
+ 
+ func (w *WireGuard) init0(ctx context.Context) error {
++	if w.closed.Load() {
++		return net.ErrClosed
++	}
+ 	if w.initOk.Load() {
+ 		return nil
+ 	}
+ 	w.initMutex.Lock()
+ 	defer w.initMutex.Unlock()
+-	// double check like sync.Once
++	// Double check after taking this outbound's private lock. Concurrent first
++	// requests for the same port share one creation; other WireGuard outbounds
++	// use different locks and continue independently.
++	if w.closed.Load() {
++		return net.ErrClosed
++	}
+ 	if w.initOk.Load() {
+ 		return nil
+ 	}
+@@ -356,16 +468,25 @@ func (w *WireGuard) init0(ctx context.Context) error {
+ 	if debug.Enabled {
+ 		log.SingLogger.Trace(fmt.Sprintf("[WG](%s) created wireguard ipc conf: \n %s", w.option.Name, ipcConf))
+ 	}
++
++	if err = w.ensureDeviceLocked(); err != nil {
++		// Device creation failures are runtime-local and may be temporary. Do not
++		// poison this outbound permanently and never touch another outbound.
++		return err
++	}
++
+ 	err = w.device.IpcSet(ipcConf)
+ 	if err != nil {
+ 		w.initErr = E.Cause(err, "setup wireguard")
++		_ = w.closeDeviceLocked()
+ 		return w.initErr
+ 	}
+ 	w.serverAddrTime.Store(time.Now())
+ 
+ 	err = w.tunDevice.Start()
+ 	if err != nil {
+-		w.initErr = err
++		w.initErr = E.Cause(err, "start wireguard device")
++		_ = w.closeDeviceLocked()
+ 		return w.initErr
+ 	}
+ 
+@@ -542,12 +663,15 @@ func (w *WireGuard) genIpcConf(ctx context.Context, updateOnly bool) (string, er
+ 	return ipcConf, nil
+ }
+ 
+-// Close implements C.ProxyAdapter
++// Close implements C.ProxyAdapter.
+ func (w *WireGuard) Close() error {
+-	if w.device != nil {
+-		w.device.Close()
++	w.initMutex.Lock()
++	defer w.initMutex.Unlock()
++	if w.closed.Swap(true) {
++		return nil
+ 	}
+-	return nil
++	w.initOk.Store(false)
++	return w.closeDeviceLocked()
+ }
+ 
+ func (w *WireGuard) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
+diff --git a/adapter/outbound/wireguard_system_other.go b/adapter/outbound/wireguard_system_other.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..776ceb9b797263b725113109cc872e14331b1da8
+--- /dev/null
++++ b/adapter/outbound/wireguard_system_other.go
+@@ -0,0 +1,25 @@
++//go:build !windows
++
++package outbound
++
++import (
++	"fmt"
++	"net/netip"
++
++	wireguard "github.com/metacubex/sing-wireguard"
++)
++
++func newWireGuardTunDevice(option WireGuardOption, localPrefixes []netip.Prefix, mtu uint32) (wireguard.Device, error) {
++	switch option.NetworkProfile {
++	case wireGuardProfileMacOS:
++		return wireguard.NewStackDeviceWithProfile(localPrefixes, mtu, wireguard.NetworkProfileMacOS)
++	case wireGuardProfileLinux:
++		return wireguard.NewStackDeviceWithProfile(localPrefixes, mtu, wireguard.NetworkProfileLinux)
++	case wireGuardProfileAndroid:
++		return wireguard.NewStackDeviceWithProfile(localPrefixes, mtu, wireguard.NetworkProfileAndroid)
++	case wireGuardProfileWindows:
++		return wireguard.NewStackDevice(localPrefixes, mtu)
++	default:
++		return nil, fmt.Errorf("unsupported WireGuard network profile %q", option.NetworkProfile)
++	}
++}
+diff --git a/adapter/outbound/wireguard_system_windows.go b/adapter/outbound/wireguard_system_windows.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..4a1fe8e69be836a2a909ad5ec0bae361aba79899
+--- /dev/null
++++ b/adapter/outbound/wireguard_system_windows.go
+@@ -0,0 +1,486 @@
++//go:build windows
++
++package outbound
++
++import (
++	"context"
++	"encoding/binary"
++	goerrors "errors"
++	"fmt"
++	"hash/fnv"
++	"net"
++	"net/netip"
++	"os"
++	"sort"
++	"strings"
++	"sync"
++	"syscall"
++	"unsafe"
++
++	"github.com/metacubex/mihomo/log"
++	singWireGuard "github.com/metacubex/sing-wireguard"
++	M "github.com/metacubex/sing/common/metadata"
++	metaTun "github.com/metacubex/wireguard-go/tun"
++	"golang.org/x/sys/windows"
++	wireguardTun "golang.zx2c4.com/wireguard/tun"
++	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
++)
++
++const (
++	// Keep the interface itself cheap for sockets pinned with IP_UNICAST_IF or
++	// IPV6_UNICAST_IF. Put the protection against accidental system-wide use on
++	// the route metric instead.
++	windowsWireGuardInterfaceMetric = 5
++	windowsWireGuardRouteMetric     = 9000
++	ipUnicastInterfaceOption        = 31
++	ipv6UnicastInterfaceOption      = 31
++)
++
++type windowsWireGuardLUIDDevice interface {
++	wireguardTun.Device
++	LUID() uint64
++}
++
++type windowsWireGuardTunDevice struct {
++	tun wireguardTun.Device
++
++	luid    winipcfg.LUID
++	name    string
++	ifIndex int
++	v4      netip.Addr
++	v6      netip.Addr
++
++	tcp4 *net.Dialer
++	tcp6 *net.Dialer
++	udp4 *net.Dialer
++	udp6 *net.Dialer
++	lc4  *net.ListenConfig
++	lc6  *net.ListenConfig
++
++	events    chan metaTun.Event
++	startOnce sync.Once
++	closeOnce sync.Once
++	closeErr  error
++}
++
++var _ singWireGuard.Device = (*windowsWireGuardTunDevice)(nil)
++
++func newWireGuardTunDevice(option WireGuardOption, localPrefixes []netip.Prefix, mtu uint32) (singWireGuard.Device, error) {
++	switch option.NetworkProfile {
++	case wireGuardProfileWindows:
++		return newWindowsWireGuardTunDevice(option, localPrefixes, mtu)
++	case wireGuardProfileMacOS:
++		log.Warnln("[WG](%s) Using macOS-like userspace stack: mtu=%d", option.Name, mtu)
++		return singWireGuard.NewStackDeviceWithProfile(localPrefixes, mtu, singWireGuard.NetworkProfileMacOS)
++	case wireGuardProfileLinux:
++		log.Warnln("[WG](%s) Using Linux-like userspace stack: mtu=%d", option.Name, mtu)
++		return singWireGuard.NewStackDeviceWithProfile(localPrefixes, mtu, singWireGuard.NetworkProfileLinux)
++	case wireGuardProfileAndroid:
++		log.Warnln("[WG](%s) Using Android-like userspace stack: mtu=%d", option.Name, mtu)
++		return singWireGuard.NewStackDeviceWithProfile(localPrefixes, mtu, singWireGuard.NetworkProfileAndroid)
++	default:
++		return nil, fmt.Errorf("unsupported WireGuard network profile %q", option.NetworkProfile)
++	}
++}
++
++func newWindowsWireGuardTunDevice(option WireGuardOption, localPrefixes []netip.Prefix, mtu uint32) (_ singWireGuard.Device, err error) {
++	if mtu == 0 {
++		return nil, fmt.Errorf("Windows WireGuard system stack requires a non-zero MTU")
++	}
++
++	var v4, v6 netip.Addr
++	addresses := make([]netip.Prefix, 0, len(localPrefixes))
++	for _, prefix := range localPrefixes {
++		if !prefix.IsValid() {
++			continue
++		}
++		addresses = append(addresses, prefix)
++		address := prefix.Addr().Unmap()
++		if address.Is4() && !v4.IsValid() {
++			v4 = address
++		} else if address.Is6() && !v6.IsValid() {
++			v6 = address
++		}
++	}
++	if len(addresses) == 0 {
++		return nil, fmt.Errorf("Windows WireGuard system stack requires at least one local address")
++	}
++
++	routePrefixes, err := windowsWireGuardRoutePrefixes(option, v4.IsValid(), v6.IsValid())
++	if err != nil {
++		return nil, err
++	}
++
++	name := windowsWireGuardInterfaceName(option.Name, addresses)
++	nativeTun, err := wireguardTun.CreateTUN(name, int(mtu))
++	if err != nil {
++		return nil, fmt.Errorf("create Wintun adapter %q: %w", name, err)
++	}
++
++	luidDevice, ok := nativeTun.(windowsWireGuardLUIDDevice)
++	if !ok {
++		_ = nativeTun.Close()
++		return nil, fmt.Errorf("Wintun adapter %q does not expose a Windows LUID", name)
++	}
++	luid := winipcfg.LUID(luidDevice.LUID())
++	if luid == 0 {
++		_ = nativeTun.Close()
++		return nil, fmt.Errorf("Wintun adapter %q returned an invalid LUID", name)
++	}
++
++	device := &windowsWireGuardTunDevice{
++		tun:    nativeTun,
++		luid:   luid,
++		name:   name,
++		v4:     v4,
++		v6:     v6,
++		events: make(chan metaTun.Event, 4),
++	}
++	defer func() {
++		if err != nil {
++			_ = device.Close()
++		}
++	}()
++
++	if err = luid.SetIPAddresses(addresses); err != nil {
++		return nil, fmt.Errorf("configure addresses on %q: %w", name, err)
++	}
++	if v4.IsValid() {
++		if err = configureWindowsWireGuardInterface(luid, windows.AF_INET, mtu); err != nil {
++			return nil, fmt.Errorf("configure IPv4 interface %q: %w", name, err)
++		}
++	}
++	if v6.IsValid() {
++		if err = configureWindowsWireGuardInterface(luid, windows.AF_INET6, mtu); err != nil {
++			return nil, fmt.Errorf("configure IPv6 interface %q: %w", name, err)
++		}
++	}
++
++	routes, err := windowsWireGuardRoutes(routePrefixes, v4.IsValid(), v6.IsValid())
++	if err != nil {
++		return nil, err
++	}
++	if err = luid.SetRoutes(routes); err != nil {
++		return nil, fmt.Errorf("configure routes on %q: %w", name, err)
++	}
++
++	interfaceRow, err := luid.Interface()
++	if err != nil {
++		return nil, fmt.Errorf("read Wintun interface %q: %w", name, err)
++	}
++	device.ifIndex = int(interfaceRow.InterfaceIndex)
++	if device.ifIndex <= 0 {
++		return nil, fmt.Errorf("Wintun interface %q has an invalid index", name)
++	}
++
++	if v4.IsValid() {
++		device.tcp4 = newWindowsWireGuardDialer("tcp4", v4, device.ifIndex)
++		device.udp4 = newWindowsWireGuardDialer("udp4", v4, device.ifIndex)
++		device.lc4 = newWindowsWireGuardListenConfig("udp4", device.ifIndex)
++	}
++	if v6.IsValid() {
++		device.tcp6 = newWindowsWireGuardDialer("tcp6", v6, device.ifIndex)
++		device.udp6 = newWindowsWireGuardDialer("udp6", v6, device.ifIndex)
++		device.lc6 = newWindowsWireGuardListenConfig("udp6", device.ifIndex)
++	}
++
++	log.Warnln("[WG](%s) Using Windows Winsock system stack: interface=%s index=%d mtu=%d", option.Name, name, device.ifIndex, mtu)
++	return device, nil
++}
++
++func windowsWireGuardRoutePrefixes(option WireGuardOption, has4, has6 bool) ([]netip.Prefix, error) {
++	routeSet := make(map[netip.Prefix]struct{})
++	addRoute := func(prefix netip.Prefix) error {
++		if !prefix.IsValid() {
++			return fmt.Errorf("invalid WireGuard allowed IP")
++		}
++		prefix = prefix.Masked()
++		address := prefix.Addr().Unmap()
++		if address.Is4() {
++			if !has4 {
++				return fmt.Errorf("IPv4 allowed IP %s requires an IPv4 WireGuard address", prefix)
++			}
++		} else if address.Is6() {
++			if !has6 {
++				return fmt.Errorf("IPv6 allowed IP %s requires an IPv6 WireGuard address", prefix)
++			}
++		} else {
++			return fmt.Errorf("unsupported WireGuard allowed IP %s", prefix)
++		}
++		routeSet[prefix] = struct{}{}
++		return nil
++	}
++
++	if len(option.Peers) > 0 {
++		for peerIndex, peer := range option.Peers {
++			for _, allowedIP := range peer.AllowedIPs {
++				prefix, err := netip.ParsePrefix(allowedIP)
++				if err != nil {
++					return nil, fmt.Errorf("parse allowed IP for peer %d: %w", peerIndex, err)
++				}
++				if err = addRoute(prefix); err != nil {
++					return nil, err
++				}
++			}
++		}
++	} else {
++		// Mihomo's legacy single-peer WireGuard configuration always installs
++		// full-tunnel allowed IPs for every configured address family.
++		if has4 {
++			_ = addRoute(netip.MustParsePrefix("0.0.0.0/0"))
++		}
++		if has6 {
++			_ = addRoute(netip.MustParsePrefix("::/0"))
++		}
++	}
++
++	if len(routeSet) == 0 {
++		return nil, fmt.Errorf("missing WireGuard allowed IP routes")
++	}
++
++	routes := make([]netip.Prefix, 0, len(routeSet))
++	for prefix := range routeSet {
++		routes = append(routes, prefix)
++	}
++	sort.Slice(routes, func(i, j int) bool {
++		if routes[i].Addr().BitLen() != routes[j].Addr().BitLen() {
++			return routes[i].Addr().BitLen() < routes[j].Addr().BitLen()
++		}
++		if routes[i].Bits() != routes[j].Bits() {
++			return routes[i].Bits() < routes[j].Bits()
++		}
++		return routes[i].Addr().Less(routes[j].Addr())
++	})
++	return routes, nil
++}
++
++func configureWindowsWireGuardInterface(luid winipcfg.LUID, family winipcfg.AddressFamily, mtu uint32) error {
++	row, err := luid.IPInterface(family)
++	if err != nil {
++		return err
++	}
++	row.RouterDiscoveryBehavior = winipcfg.RouterDiscoveryDisabled
++	row.DadTransmits = 0
++	row.ManagedAddressConfigurationSupported = false
++	row.OtherStatefulConfigurationSupported = false
++	row.NLMTU = mtu
++	row.UseAutomaticMetric = false
++	row.Metric = windowsWireGuardInterfaceMetric
++	return row.Set()
++}
++
++func windowsWireGuardRoutes(prefixes []netip.Prefix, has4, has6 bool) ([]*winipcfg.RouteData, error) {
++	routes := make([]*winipcfg.RouteData, 0, len(prefixes))
++	for _, prefix := range prefixes {
++		if !prefix.IsValid() {
++			return nil, fmt.Errorf("invalid Windows WireGuard route")
++		}
++		prefix = prefix.Masked()
++		nextHop := netip.IPv6Unspecified()
++		if prefix.Addr().Is4() {
++			if !has4 {
++				return nil, fmt.Errorf("IPv4 route %s requires an IPv4 WireGuard address", prefix)
++			}
++			nextHop = netip.IPv4Unspecified()
++		} else if prefix.Addr().Is6() {
++			if !has6 {
++				return nil, fmt.Errorf("IPv6 route %s requires an IPv6 WireGuard address", prefix)
++			}
++		} else {
++			return nil, fmt.Errorf("unsupported Windows WireGuard route %s", prefix)
++		}
++		routes = append(routes, &winipcfg.RouteData{
++			Destination: prefix,
++			NextHop:     nextHop,
++			Metric:      windowsWireGuardRouteMetric,
++		})
++	}
++	return routes, nil
++}
++
++func windowsWireGuardInterfaceName(proxyName string, prefixes []netip.Prefix) string {
++	parts := make([]string, 0, len(prefixes)+1)
++	parts = append(parts, proxyName)
++	for _, prefix := range prefixes {
++		parts = append(parts, prefix.String())
++	}
++	sort.Strings(parts[1:])
++	hash := fnv.New32a()
++	_, _ = hash.Write([]byte(strings.Join(parts, ",")))
++	return fmt.Sprintf("Mihomo WG %08x", hash.Sum32())
++}
++
++func newWindowsWireGuardDialer(network string, localAddr netip.Addr, ifIndex int) *net.Dialer {
++	dialer := &net.Dialer{}
++
++	// Do not hard-bind the IPv4 /32 source. IP_UNICAST_IF pins the socket
++	// to this Wintun adapter while Windows selects its configured IPv4 source.
++	// Bind IPv6 explicitly because a ULA /128 otherwise has unreliable source
++	// selection on Windows when several interfaces are active.
++	switch network {
++	case "udp4":
++		dialer.LocalAddr = &net.UDPAddr{IP: net.IP(localAddr.AsSlice())}
++	case "tcp6":
++		dialer.LocalAddr = &net.TCPAddr{IP: net.IP(localAddr.AsSlice())}
++	case "udp6":
++		dialer.LocalAddr = &net.UDPAddr{IP: net.IP(localAddr.AsSlice())}
++	}
++	dialer.Control = windowsWireGuardInterfaceControl(network, ifIndex)
++	return dialer
++}
++
++func newWindowsWireGuardListenConfig(network string, ifIndex int) *net.ListenConfig {
++	listenConfig := &net.ListenConfig{}
++	listenConfig.Control = windowsWireGuardInterfaceControl(network, ifIndex)
++	return listenConfig
++}
++
++func windowsWireGuardInterfaceControl(expectedNetwork string, ifIndex int) func(string, string, syscall.RawConn) error {
++	return func(_, _ string, raw syscall.RawConn) error {
++		var socketErr error
++		controlErr := raw.Control(func(fd uintptr) {
++			switch expectedNetwork {
++			case "tcp4", "udp4":
++				var indexBytes [4]byte
++				binary.BigEndian.PutUint32(indexBytes[:], uint32(ifIndex))
++				index := *(*uint32)(unsafe.Pointer(&indexBytes[0]))
++				socketErr = windows.SetsockoptInt(windows.Handle(fd), windows.IPPROTO_IP, ipUnicastInterfaceOption, int(index))
++			case "tcp6", "udp6":
++				socketErr = windows.SetsockoptInt(windows.Handle(fd), windows.IPPROTO_IPV6, ipv6UnicastInterfaceOption, ifIndex)
++			default:
++				socketErr = fmt.Errorf("unsupported Windows WireGuard network %q", expectedNetwork)
++			}
++		})
++		if controlErr != nil {
++			return controlErr
++		}
++		return socketErr
++	}
++}
++
++func (d *windowsWireGuardTunDevice) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++	if !destination.Addr.IsValid() {
++		return nil, fmt.Errorf("Windows WireGuard system stack requires a resolved destination")
++	}
++	remoteIP := destination.Addr.Unmap()
++	remote := netip.AddrPortFrom(remoteIP, destination.Port)
++
++	network = strings.ToLower(network)
++	switch {
++	case strings.HasPrefix(network, "tcp"):
++		if remoteIP.Is4() {
++			if d.tcp4 == nil {
++				return nil, fmt.Errorf("IPv4 is not configured on %q", d.name)
++			}
++			return d.tcp4.DialContext(ctx, "tcp4", remote.String())
++		}
++		if d.tcp6 == nil {
++			return nil, fmt.Errorf("IPv6 is not configured on %q", d.name)
++		}
++		return d.tcp6.DialContext(ctx, "tcp6", remote.String())
++	case strings.HasPrefix(network, "udp"):
++		if remoteIP.Is4() {
++			if d.udp4 == nil {
++				return nil, fmt.Errorf("IPv4 is not configured on %q", d.name)
++			}
++			return d.udp4.DialContext(ctx, "udp4", remote.String())
++		}
++		if d.udp6 == nil {
++			return nil, fmt.Errorf("IPv6 is not configured on %q", d.name)
++		}
++		return d.udp6.DialContext(ctx, "udp6", remote.String())
++	default:
++		return nil, fmt.Errorf("unsupported Windows WireGuard network %q", network)
++	}
++}
++
++func (d *windowsWireGuardTunDevice) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
++	if !destination.Addr.IsValid() {
++		return nil, fmt.Errorf("Windows WireGuard system stack requires a resolved UDP destination")
++	}
++	remoteIP := destination.Addr.Unmap()
++	if remoteIP.Is4() {
++		if d.lc4 == nil || !d.v4.IsValid() {
++			return nil, fmt.Errorf("IPv4 is not configured on %q", d.name)
++		}
++		return d.lc4.ListenPacket(ctx, "udp4", net.JoinHostPort(d.v4.String(), "0"))
++	}
++	if d.lc6 == nil || !d.v6.IsValid() {
++		return nil, fmt.Errorf("IPv6 is not configured on %q", d.name)
++	}
++	return d.lc6.ListenPacket(ctx, "udp6", net.JoinHostPort(d.v6.String(), "0"))
++}
++
++func (d *windowsWireGuardTunDevice) Start() error {
++	d.startOnce.Do(func() {
++		d.events <- metaTun.EventUp
++	})
++	return nil
++}
++
++func (d *windowsWireGuardTunDevice) Inet4Address() netip.Addr {
++	return d.v4
++}
++
++func (d *windowsWireGuardTunDevice) Inet6Address() netip.Addr {
++	return d.v6
++}
++
++func (d *windowsWireGuardTunDevice) RegisterForward(singWireGuard.ForwardOptions) error {
++	return fmt.Errorf("packet forwarding is unavailable on the Windows WireGuard system stack")
++}
++
++func (d *windowsWireGuardTunDevice) File() *os.File {
++	return d.tun.File()
++}
++
++func (d *windowsWireGuardTunDevice) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
++	return d.tun.Read(bufs, sizes, offset)
++}
++
++func (d *windowsWireGuardTunDevice) Write(bufs [][]byte, offset int) (int, error) {
++	return d.tun.Write(bufs, offset)
++}
++
++func (d *windowsWireGuardTunDevice) MTU() (int, error) {
++	return d.tun.MTU()
++}
++
++func (d *windowsWireGuardTunDevice) Name() (string, error) {
++	return d.tun.Name()
++}
++
++func (d *windowsWireGuardTunDevice) Events() <-chan metaTun.Event {
++	return d.events
++}
++
++func (d *windowsWireGuardTunDevice) BatchSize() int {
++	return d.tun.BatchSize()
++}
++
++func (d *windowsWireGuardTunDevice) Close() error {
++	d.closeOnce.Do(func() {
++		var errs []error
++		select {
++		case d.events <- metaTun.EventDown:
++		default:
++		}
++
++		if d.luid != 0 {
++			if err := d.luid.FlushRoutes(windows.AF_UNSPEC); err != nil {
++				errs = append(errs, fmt.Errorf("flush routes on %q: %w", d.name, err))
++			}
++			if err := d.luid.FlushIPAddresses(windows.AF_UNSPEC); err != nil {
++				errs = append(errs, fmt.Errorf("flush addresses on %q: %w", d.name, err))
++			}
++		}
++		if d.tun != nil {
++			if err := d.tun.Close(); err != nil {
++				errs = append(errs, fmt.Errorf("close Wintun adapter %q: %w", d.name, err))
++			}
++		}
++		close(d.events)
++		d.closeErr = goerrors.Join(errs...)
++	})
++	return d.closeErr
++}

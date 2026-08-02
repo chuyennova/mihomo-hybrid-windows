@@ -1,0 +1,66 @@
+proxies:
+  - name: WG-WINDOWS-01
+    type: wireguard
+    network-profile: windows
+    server: example.com
+    port: 51820
+    ip: 10.0.0.2/32
+    ipv6: fd00::2/128
+    private-key: REPLACE_ME
+    public-key: REPLACE_ME
+    udp: true
+
+  - name: WG-MACOS-01
+    type: wireguard
+    network-profile: macos
+    server: example.com
+    port: 51820
+    ip: 10.0.1.2/32
+    ipv6: fd00:1::2/128
+    private-key: REPLACE_ME
+    public-key: REPLACE_ME
+    udp: true
+
+  - name: WG-LINUX-01
+    type: wireguard
+    network-profile: linux
+    server: example.com
+    port: 51820
+    ip: 10.0.2.2/32
+    ipv6: fd00:2::2/128
+    private-key: REPLACE_ME
+    public-key: REPLACE_ME
+    udp: true
+
+  - name: WG-ANDROID-01
+    type: wireguard
+    network-profile: android
+    server: example.com
+    port: 51820
+    ip: 10.0.3.2/32
+    ipv6: fd00:3::2/128
+    private-key: REPLACE_ME
+    public-key: REPLACE_ME
+    udp: true
+
+listeners:
+  - name: SOCKS-WINDOWS
+    type: socks
+    listen: 127.0.0.1
+    port: 10001
+    proxy: WG-WINDOWS-01
+  - name: SOCKS-MACOS
+    type: socks
+    listen: 127.0.0.1
+    port: 10002
+    proxy: WG-MACOS-01
+  - name: SOCKS-LINUX
+    type: socks
+    listen: 127.0.0.1
+    port: 10003
+    proxy: WG-LINUX-01
+  - name: SOCKS-ANDROID
+    type: socks
+    listen: 127.0.0.1
+    port: 10004
+    proxy: WG-ANDROID-01

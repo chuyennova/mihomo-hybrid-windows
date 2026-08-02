@@ -1,0 +1,36 @@
+Mihomo v1.19.29 Hybrid 4 Profiles - Static Verification Report
+Generated: 2026-08-02
+
+INPUT HASHES
+baseline: c9c47c922c2595a83bf204ffd7aebbc33b86f6b145a890c58a1c434a8c34aff4
+windows:  8ff5fbb7e8cda7cddf0b791caf55c50e75a1732a96d6c31286d3eb392b61d642
+macos:    e49273ead00ee2f97a43b87c111691184acc66eee9665425a9982f625ee9cba7
+linux:    a2cff20d187ee83c76e52c823f984922f1cfb7d754573a4d31ce38edb77d3ba0
+android:  b5d1f836a23da8349719ca45e5cc783e62d0f50c61dc1107ff84d95aadaddd74
+
+LOCKED DEPENDENCIES
+sing-wireguard: 7e7c7c1b854c6bb82cd898ccafc61104ef96d1cf
+gvisor:        261ec1326fe8d747e55bd13512758fb5ed0b1d87
+wireguard-go:  a6cecdd7f57f (version locked by go.mod)
+
+PASSED
+- Four uploaded ZIP hashes verified.
+- Core hybrid Go files formatted successfully with gofmt.
+- apply_hybrid.py and both imported Linux patch scripts pass Python byte-code compilation.
+- All shell scripts pass bash -n.
+- GitHub Actions workflow and example YAML parse successfully.
+- The hybrid patch was applied successfully to the exact upstream files downloaded from the locked sing-wireguard and gVisor commits.
+- Post-patch exact-marker verification passed.
+- All 13 touched dependency Go files pass gofmt after patching.
+- network-profile values are limited to windows, macos, linux, android.
+- Missing network-profile defaults to windows.
+- Android MTU defaults to 1360; Windows/macOS/Linux default to 1408; explicit YAML mtu takes precedence.
+- Windows selects native Wintun/Winsock; macOS/Linux/Android select independent gVisor stacks.
+- No global runtime profile selector is introduced.
+
+NOT EXECUTED LOCALLY
+- Full go test and Windows executable compile.
+Reason: this sandbox cannot resolve/download the complete Go module graph and has Go 1.23.2, while the locked project workflow targets the MetaCubeX Go 1.26 toolchain.
+
+FINAL CONFIRMATION PATH
+Run .github/workflows/build-windows-hybrid.yml. It vendors the exact dependency graph, applies the verified patch, runs targeted tests, compiles verge-mihomo.exe, downloads wintun.dll, packages outputs, and uploads summary.txt/full-build.log even when a step fails.
