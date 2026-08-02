@@ -7,6 +7,7 @@
 - `golang.zx2c4.com/wireguard`: `v0.0.0-20250521234502-f333402bd9cb`
 - `golang.zx2c4.com/wireguard/windows`: `v1.0.1`
 - Wintun: `0.14.1`, archive SHA-256 `07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51`
-- Patch revision: `hybrid-4profiles-v6-auto-r1`
+- Build toolchain: MetaCubeX Go `1.26`
+- Patch revision: `hybrid-4profiles-v6-auto-r2-go126`
 
 Exact-match vendor transformations intentionally stop when dependency APIs change. That failure is the maintenance signal; it must never silently produce a partially patched executable.

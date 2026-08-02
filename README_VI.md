@@ -86,10 +86,23 @@ Một Issue `auto-build-failed` duy nhất được tạo cho tag lỗi. Các l�
 
 Vào **Actions → Build exact Mihomo tag — hybrid 4 profiles → Run workflow**, nhập một stable tag chính xác. Không cần Personal Access Token; workflow dùng `GITHUB_TOKEN` với quyền trong repository.
 
+## Sửa lỗi Go 1.20 của bản r1
+
+Run thử `v1.19.29` số `30763035640` cho thấy bản r1 đã đọc `go 1.20` từ upstream `go.mod`, khiến dependency mới báo thiếu `slices` và `crypto/sha3`. Bản r2 khóa đúng MetaCubeX Go `1.26`, giống workflow overlay v6 đã từng build thành công, đồng thời kiểm tra thực tế `go version` trước khi tiếp tục.
+
+Sau khi upload bản r2, chạy thử thủ công:
+
+```text
+upstream_tag: v1.19.29
+release_revision: test-r2
+publish_release: false
+```
+
 ## Mốc kiểm tra
 
 - Overlay nguồn đã nhận: `mihomo-v1.19.29-hybrid-4profiles-overlay-v6-buildtags-fix(4).zip`
 - SHA-256 overlay nguồn: `974a71fe1ef4aa8872c197fafd93115a6aeccf9f174148dc89bcdf3dc03092af`
 - Core patch SHA-256: `7ce5f7a7b481dced7d77ba759694aa76e39b693a2bc9af32b341af4a0072c922`
 - Baseline core: upstream tag `v1.19.29`
-- Patch revision: `hybrid-4profiles-v6-auto-r1`
+- Go toolchain: MetaCubeX Go `1.26` (không đọc `go-version` từ upstream `go.mod`)
+- Patch revision: `hybrid-4profiles-v6-auto-r2-go126`
