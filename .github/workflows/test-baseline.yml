@@ -1,42 +1,19 @@
-name: Verify stored v1.19.29 baseline archive only
+name: Test known-good v1.19.30 hybrid baseline
 
 on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+  issues: write
 
 jobs:
-  verify-archive:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - name: Verify archive without compiling Mihomo
-        id: verify
-        continue-on-error: true
-        shell: bash
-        run: |
-          mkdir -p baseline-logs
-          {
-            test -s mihomo-1.19.29.zip
-            sha256sum mihomo-1.19.29.zip
-            unzip -t mihomo-1.19.29.zip
-            unzip -Z1 mihomo-1.19.29.zip > baseline-logs/file-list.txt
-            sed -n '1,100p' baseline-logs/file-list.txt
-            echo "This workflow intentionally does not compile v1.19.29."
-          } 2>&1 | tee baseline-logs/verify.txt
-      - name: Upload verification log
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@v7
-        with:
-          name: baseline-archive-check-${{ github.run_id }}
-          path: baseline-logs/
-          retention-days: 7
-          if-no-files-found: warn
-      - name: Preserve verification result
-        if: always() && steps.verify.outcome != 'success'
-        run: exit 1
+  baseline:
+    uses: ./.github/workflows/build-tag.yml
+    with:
+      upstream_tag: v1.19.30
+      release_revision: baseline-test
+      publish_release: false
+    permissions:
+      contents: write
+      issues: write

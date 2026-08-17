@@ -1,4 +1,4 @@
-name: Build exact Mihomo tag — hybrid 4 profiles
+name: Build exact Mihomo tag — hybrid 4 profiles v1.19.30+ v2.2
 
 on:
   workflow_call:
@@ -41,23 +41,23 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  BASELINE_TAG: v1.19.29
-  PATCH_REVISION: hybrid-4profiles-v6-auto-r2-go126
+  BASELINE_TAG: v1.19.30
+  PATCH_REVISION: hybrid-4profiles-v11930-v2.2-auto-r1
   UPSTREAM_TAG: ${{ inputs.upstream_tag }}
   RELEASE_REVISION: ${{ inputs.release_revision }}
   GOTOOLCHAIN: local
 
 jobs:
   build:
-    name: Patch, test and compile
+    name: Patch, audit, test and compile
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 90
 
     outputs:
       candidate_name: ${{ steps.names.outputs.candidate_name }}
 
     steps:
-      - name: Checkout overlay builder only
+      - name: Checkout auto-builder only
         uses: actions/checkout@v6
         with:
           fetch-depth: 1
@@ -71,11 +71,17 @@ jobs:
           : > ci-logs/full-build.log
 
           {
+            echo "===== MIHOMO HYBRID AUTO BUILD START ====="
             echo "upstream_tag=$UPSTREAM_TAG"
             echo "baseline_tag=$BASELINE_TAG"
             echo "patch_revision=$PATCH_REVISION"
+            echo "repository=$GITHUB_REPOSITORY"
+            echo "run_id=$GITHUB_RUN_ID"
+            echo "run_attempt=$GITHUB_RUN_ATTEMPT"
             echo "run_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo "started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "runner_os=$RUNNER_OS"
+            echo "runner_arch=$RUNNER_ARCH"
           } | tee -a ci-logs/full-build.log
 
           echo "BUILDER_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
@@ -96,7 +102,7 @@ jobs:
 
           exit "$rc"
 
-      - name: Set up MetaCubeX Go 1.26
+      - name: 02 — Set up MetaCubeX Go 1.26
         id: setup_go
         if: always()
         continue-on-error: true
@@ -106,11 +112,12 @@ jobs:
           go-download-base-url: https://github.com/MetaCubeX/go/releases/download/build
           cache: false
 
-      - name: Verify Go 1.26 and record setup outcome
+      - name: Record Go setup result
         if: always()
         shell: bash
         run: |
           set +e
+          mkdir -p ci-logs/status ci-logs/diagnostics
 
           actual_go="$(go version 2>&1)"
           rc=0
@@ -121,27 +128,33 @@ jobs:
             rc=1
           fi
 
-          echo "$rc" > ci-logs/status/setup-go.exit
+          printf '%s\n' "$rc" > ci-logs/status/setup-go.exit
 
           {
             echo "setup_go_outcome=${{ steps.setup_go.outcome }}"
             echo "expected_go=go1.26"
             echo "actual_go=$actual_go"
-          } | tee -a \
-            ci-logs/full-build.log \
-            ci-logs/diagnostics/setup-go.txt
+          } | tee -a ci-logs/full-build.log ci-logs/diagnostics/setup-go.txt
 
-      - name: 02 — Record Go environment
+      - name: 03 — Verify upstream compatibility locks
         if: always()
         continue-on-error: true
         shell: bash
-        working-directory: source
         run: >
-          bash "$BUILDER_ROOT/scripts/ci_run.sh"
-          go-environment
-          bash "$BUILDER_ROOT/overlay/hybrid-v6/tools/hybrid/steps/environment.sh"
+          bash scripts/ci_run.sh
+          upstream-compat
+          bash scripts/verify_upstream_compat.sh source
 
-      - name: 03 — Apply minimal core patch
+      - name: 04 — Record build environment
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: >
+          bash scripts/ci_run.sh
+          go-environment
+          bash scripts/record_environment.sh source
+
+      - name: 05 — Apply v1.19.30 four-profile core patch
         if: always()
         continue-on-error: true
         shell: bash
@@ -150,7 +163,16 @@ jobs:
           apply-core-patch
           bash scripts/apply_core_patch.sh source
 
-      - name: 04 — Add required Windows modules without replacing upstream go.mod
+      - name: 06 — Verify exact baseline core result
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: >
+          bash scripts/ci_run.sh
+          core-baseline-verify
+          bash scripts/verify_core_baseline.sh source
+
+      - name: 07 — Prepare module graph safely
         if: always()
         continue-on-error: true
         shell: bash
@@ -159,114 +181,134 @@ jobs:
           prepare-modules
           bash scripts/prepare_modules.sh source
 
-      - name: 05 — Verify patched source and dependency locks
+      - name: 08 — Verify patched source and dependency locks
         if: always()
         continue-on-error: true
         shell: bash
-        working-directory: source
         run: >
-          bash "$BUILDER_ROOT/scripts/ci_run.sh"
+          bash scripts/ci_run.sh
           source-verify
+          bash scripts/run_in_source.sh source
           bash tools/hybrid/steps/source_verify.sh
 
-      - name: 06 — Resolve and vendor dependencies
+      - name: 09 — Install build tools
         if: always()
         continue-on-error: true
         shell: bash
-        working-directory: source
         run: >
-          bash "$BUILDER_ROOT/scripts/ci_run.sh"
+          bash scripts/ci_run.sh
+          install-tools
+          bash scripts/run_in_source.sh source
+          bash tools/hybrid/steps/install_tools.sh
+
+      - name: 10 — Resolve and vendor dependencies
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: >
+          bash scripts/ci_run.sh
           vendor
+          bash scripts/run_in_source.sh source
           bash tools/hybrid/steps/vendor.sh
 
-      - name: 07 — Apply exact hybrid vendor transformations
+      - name: 11 — Apply locked v2.2 vendor overlay
         if: always()
         continue-on-error: true
         shell: bash
-        working-directory: source
         run: >
-          bash "$BUILDER_ROOT/scripts/ci_run.sh"
-          apply-vendor-patch
-          python3 tools/hybrid/apply_hybrid.py --root .
+          bash scripts/ci_run.sh
+          apply-vendor-overlay
+          bash scripts/run_in_source.sh source
+          bash tools/hybrid/apply_vendor_overlay.sh .
 
-      - name: 08 — Gofmt patched files
+      - name: 12 — Gofmt patched files
         if: always()
         continue-on-error: true
         shell: bash
-        working-directory: source
         run: >
-          bash "$BUILDER_ROOT/scripts/ci_run.sh"
+          bash scripts/ci_run.sh
           gofmt
+          bash scripts/run_in_source.sh source
           bash tools/hybrid/steps/gofmt.sh
 
-      - name: 09 — Verify all four profiles after patching
+      - name: 13 — Verify four-profile integration
         if: always()
         continue-on-error: true
         shell: bash
-        working-directory: source
         run: >
-          bash "$BUILDER_ROOT/scripts/ci_run.sh"
-          verify-patch
-          python3 tools/hybrid/apply_hybrid.py --root . --verify-only
+          bash scripts/ci_run.sh
+          verify-hybrid
+          bash scripts/run_in_source.sh source
+          bash tools/hybrid/verify_hybrid.sh
 
-      - name: 10 — Targeted tests
+      - name: 14 — Audit four profiles and IPv6
         if: always()
         continue-on-error: true
         shell: bash
-        working-directory: source
         run: >
-          bash "$BUILDER_ROOT/scripts/ci_run.sh"
+          bash scripts/ci_run.sh
+          profile-audit
+          bash scripts/run_in_source.sh source
+          bash tools/hybrid/steps/profile_audit.sh
+
+      - name: 15 — Targeted regression tests
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: >
+          bash scripts/ci_run.sh
           tests
+          bash scripts/run_in_source.sh source
           bash tools/hybrid/steps/tests.sh
 
-      - name: 11 — Compile verge-mihomo.exe
+      - name: 16 — Compile verge-mihomo.exe
         if: always()
         continue-on-error: true
         shell: bash
-        working-directory: source
         env:
           CGO_ENABLED: "0"
           GOOS: windows
           GOARCH: amd64
           GOAMD64: v2
         run: >
-          bash "$BUILDER_ROOT/scripts/ci_run.sh"
+          bash scripts/ci_run.sh
           compile
+          bash scripts/run_in_source.sh source
           bash tools/hybrid/steps/compile.sh
 
-      - name: 12 — Download and verify Wintun amd64
+      - name: 17 — Download and verify Wintun amd64
         if: always()
         continue-on-error: true
         shell: bash
-        working-directory: source
         run: >
-          bash "$BUILDER_ROOT/scripts/ci_run.sh"
+          bash scripts/ci_run.sh
           wintun
+          bash scripts/run_in_source.sh source
           bash tools/hybrid/steps/wintun.sh
 
-      - name: 13 — Static PE smoke test
+      - name: 18 — Static PE AMD64 smoke test
         if: always()
         continue-on-error: true
         shell: bash
-        working-directory: source
         run: >
-          bash "$BUILDER_ROOT/scripts/ci_run.sh"
+          bash scripts/ci_run.sh
           linux-smoke
+          bash scripts/run_in_source.sh source
           python3 "$BUILDER_ROOT/scripts/verify_pe.py"
           dist/verge-mihomo.exe
           dist/wintun.dll
 
-      - name: 14 — Package fixed runtime filenames
+      - name: 19 — Package fixed runtime filenames
         if: always()
         continue-on-error: true
         shell: bash
-        working-directory: source
         run: >
-          bash "$BUILDER_ROOT/scripts/ci_run.sh"
+          bash scripts/ci_run.sh
           package
+          bash scripts/run_in_source.sh source
           bash tools/hybrid/steps/package.sh
 
-      - name: Evaluate build gate
+      - name: Evaluate build quality gate
         id: gate
         if: always()
         continue-on-error: true
@@ -516,6 +558,7 @@ jobs:
 
           cat > release-notes.txt <<NOTES
           Mihomo upstream: ${UPSTREAM_TAG}
+          Hybrid baseline: ${BASELINE_TAG}
           Hybrid patch: ${PATCH_REVISION}
           Windows amd64: verge-mihomo.exe + wintun.dll
           Workflow: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
@@ -531,8 +574,7 @@ jobs:
             "${sums_file}#SHA256SUMS.txt" \
             "${info_file}#build-info.json" \
             "${zip_file}#verge-mihomo-${UPSTREAM_TAG}-hybrid-windows-amd64.zip" \
-            2>&1 |
-            tee release-logs/release.log
+            2>&1 | tee release-logs/release.log
 
       - name: Upload release logs
         if: always()
@@ -580,9 +622,7 @@ jobs:
           if [[ "$BUILD_RESULT" == "success" && "$WINDOWS_RESULT" == "success" ]] && \
              { [[ "$PUBLISH_RELEASE" != "true" ]] || [[ "$RELEASE_RESULT" == "success" ]]; }
           then
-            echo "BUILD_OUTCOME=success" >> "$GITHUB_ENV"
             BUILD_OUTCOME=success python3 scripts/manage_issue.py
           else
-            echo "BUILD_OUTCOME=failure" >> "$GITHUB_ENV"
             BUILD_OUTCOME=failure python3 scripts/manage_issue.py
           fi

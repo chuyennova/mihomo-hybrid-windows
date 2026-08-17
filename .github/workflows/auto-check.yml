@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  BASELINE_TAG: v1.19.29
+  BASELINE_TAG: v1.19.30
   RELEASE_REVISION: r1
 
 jobs:
@@ -22,13 +22,18 @@ jobs:
     name: Detect one new stable tag
     runs-on: ubuntu-latest
     timeout-minutes: 10
+
     outputs:
       latest_tag: ${{ steps.detect.outputs.latest_tag }}
       should_build: ${{ steps.detect.outputs.should_build }}
+
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout auto-builder
+        uses: actions/checkout@v6
         with:
+          fetch-depth: 1
           persist-credentials: false
+
       - name: Query official MetaCubeX latest stable Release
         id: detect
         shell: bash
@@ -37,6 +42,7 @@ jobs:
         run: |
           mkdir -p auto-check-logs
           python3 scripts/detect_latest.py 2>&1 | tee auto-check-logs/detect.txt
+
       - name: Upload detection log
         if: always()
         continue-on-error: true
@@ -46,8 +52,10 @@ jobs:
           path: auto-check-logs/
           if-no-files-found: warn
           retention-days: 7
+          compression-level: 9
 
   build:
+    name: Build newly detected stable tag
     needs: detect
     if: needs.detect.outputs.should_build == 'true'
     uses: ./.github/workflows/build-tag.yml
