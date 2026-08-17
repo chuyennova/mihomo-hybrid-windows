@@ -1,0 +1,84 @@
+Mihomo v1.19.30 hybrid 4 profiles V2.2 - static/dry-run verification
+===================================================================
+
+Purpose
+-------
+V2 is a focused hardening of the already successful v1.19.30 V1 hybrid.
+It intentionally preserves the working IPv4/profile selector/native-Windows
+architecture and changes the Linux/Android IPv6 automatic Flow Label path,
+CI profile auditing, and dependency reproducibility.
+
+Locked basis
+------------
+Mihomo tag:                  v1.19.30
+Clean wireguard.go SHA-256:  79e1112faaaf9fc7c5e84bc2811c7f7320c18504a734dc0bf399021f63c50868
+sing-wireguard:              110eac03c3f0
+gVisor:                      3cc44cf9ac22
+wireguard-go:                a6cecdd7f57f
+Frozen V2 go.mod SHA-256:    239edfc51e752756e32367abd8feef379cb8e2b94891b78a6fc0438cabd2497a
+Frozen V2 go.sum SHA-256:    01424dfc0434d085a4ed9bab7046d1b3b1c16bea96e43a1f9ff8ebbe592f8546
+
+Profiles preserved
+------------------
+windows  -> native Wintun/Winsock, lazy per outbound, IPv4/IPv6 by Windows kernel
+macos    -> profile-aware gVisor macOS-like
+linux    -> profile-aware gVisor Linux-like
+android  -> profile-aware gVisor Android-like; default MTU 1360 when omitted
+omitted  -> upstream v1.19.30 ip-stack path (auto/gvisor/mips)
+
+V2 IPv6 changes
+---------------
+[OK] Linux and Android automatic IPv6 Flow Labels use one per-stack secret.
+[OK] Flow key input mirrors Linux flow_keys hash span for ordinary IPv6 flows:
+     protocol, zero flow-label/keyid metadata, ports, canonical IPv6 endpoints.
+[OK] SipHash-2-4 implementation carries an official reference-vector test.
+[OK] The 32-bit hash is rotate-left 16 then masked to 20 bits.
+[OK] The old unconditional 0x00080000 state-range bit is removed.
+[OK] Linux and Android IPv6 network protocols both opt into automatic labels.
+[OK] IPv6 default Hop Limit remains 64 for gVisor profiles.
+[OK] macOS profile logic is intentionally unchanged from successful V1.
+[OK] Windows profile remains native Wintun/Winsock and is intentionally unchanged.
+
+CI / audit changes
+------------------
+[OK] Mandatory profile-audit.txt and profile-audit.json are generated.
+[OK] Profile audit checks selector, per-outbound storage, lazy initialization,
+     native Windows IPv6 binding, gVisor profile constructors, Flow Label path,
+     Hop Limit and Android MTU behavior.
+[OK] Executable TestHybrid suites are run for gVisor stack and IPv6 packages.
+[OK] Targeted tests continue after an audit failure to expose more than one issue.
+[OK] Binary artifact is only uploaded when profile audit + tests + compile +
+     Wintun + package all succeed.
+[OK] Full logs, per-step logs, diagnostics and summary are finalized/uploaded
+     with if: always(); log upload uses continue-on-error behavior in finalization.
+[OK] V2 does not run go mod tidy. It verifies and vendors the exact module graph
+     captured from the successful V1 GitHub build.
+
+Checks executed in this environment
+-----------------------------------
+[OK] Vendor overlay applied against exact locked original dependency hashes.
+[OK] verify_hybrid.sh passed on the V2 patched dry-run dependency tree.
+[OK] bash -n passed every shipped shell script.
+[OK] GitHub workflow YAML parsed successfully.
+[OK] Example YAML parsed successfully.
+[OK] gofmt reported no diff for every shipped Go file.
+[OK] No stale V1 artifact/revision labels were found in V2 executable scripts.
+[OK] No forced Linux/Android IPv6 0x00080000 state-range bit remains.
+
+Not claimed locally
+-------------------
+A full end-to-end Go build was not executed in this container because its local
+Go is 1.23.2 while the frozen successful V1 graph requires Go >=1.25 and this
+runtime cannot reliably download a newer toolchain/module graph. The supplied
+GitHub Actions workflow uses the MetaCubeX Go 1.26 toolchain and performs the
+actual vendor, executable regression tests, Windows cross-compile, full binary
+compile, Wintun packaging and final quality gate.
+
+Runtime packet capture remains the final proof of wire-visible IPv6 behavior.
+The CI audit proves code-path selection and deterministic algorithm properties;
+it cannot observe changes made later by a WireGuard peer, NAT, router or ISP.
+
+V2.2 regression-test compile fix
+-------------------------------
+[OK] IPv6 DefaultTTL test now normalizes DefaultTTL with int(DefaultTTL) before comparing with 64; this fixes the V2.1 int-vs-uint8 compile error.
+[OK] Production hybrid/profile Go files are unchanged from V2.1.

@@ -1,0 +1,87 @@
+allow-lan: false
+mode: rule
+log-level: info
+
+listeners:
+  - name: SOCKS-WINDOWS
+    type: mixed
+    listen: 127.0.0.1
+    port: 10881
+  - name: SOCKS-MACOS
+    type: mixed
+    listen: 127.0.0.1
+    port: 10882
+  - name: SOCKS-LINUX
+    type: mixed
+    listen: 127.0.0.1
+    port: 10883
+  - name: SOCKS-ANDROID
+    type: mixed
+    listen: 127.0.0.1
+    port: 10884
+
+proxies:
+  - name: WG-WINDOWS
+    type: wireguard
+    network-profile: windows
+    server: 192.0.2.10
+    port: 51820
+    ip: 10.0.0.2
+    private-key: REPLACE_ME
+    public-key: REPLACE_ME
+    allowed-ips: ["0.0.0.0/0"]
+    udp: true
+
+  - name: WG-MACOS
+    type: wireguard
+    network-profile: macos
+    server: 192.0.2.11
+    port: 51820
+    ip: 10.0.0.3
+    private-key: REPLACE_ME
+    public-key: REPLACE_ME
+    allowed-ips: ["0.0.0.0/0"]
+    udp: true
+
+  - name: WG-LINUX
+    type: wireguard
+    network-profile: linux
+    server: 192.0.2.12
+    port: 51820
+    ip: 10.0.0.4
+    private-key: REPLACE_ME
+    public-key: REPLACE_ME
+    allowed-ips: ["0.0.0.0/0"]
+    udp: true
+
+  - name: WG-ANDROID
+    type: wireguard
+    network-profile: android
+    server: 192.0.2.13
+    port: 51820
+    ip: 10.0.0.5
+    private-key: REPLACE_ME
+    public-key: REPLACE_ME
+    allowed-ips: ["0.0.0.0/0"]
+    udp: true
+
+proxy-groups:
+  - name: P-WINDOWS
+    type: select
+    proxies: [WG-WINDOWS]
+  - name: P-MACOS
+    type: select
+    proxies: [WG-MACOS]
+  - name: P-LINUX
+    type: select
+    proxies: [WG-LINUX]
+  - name: P-ANDROID
+    type: select
+    proxies: [WG-ANDROID]
+
+rules:
+  - IN-NAME,SOCKS-WINDOWS,P-WINDOWS
+  - IN-NAME,SOCKS-MACOS,P-MACOS
+  - IN-NAME,SOCKS-LINUX,P-LINUX
+  - IN-NAME,SOCKS-ANDROID,P-ANDROID
+  - MATCH,DIRECT

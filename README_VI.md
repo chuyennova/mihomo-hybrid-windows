@@ -1,62 +1,181 @@
-# Mihomo Hybrid Windows — overlay auto-build
+# Mihomo Hybrid Windows — Auto Builder v1.19.30+ / 4 Profiles v2.2
 
-Gói này chỉ chứa **overlay/patch và GitHub Actions**. Gói **không chứa** toàn bộ mã nguồn Mihomo, không chứa `mihomo-1.19.29.zip`, không chứa EXE/DLL đã build.
+Gói này được tạo từ logic hybrid mới nhất:
 
-## Đưa lên repository
+`mihomo-v1.19.30-hybrid-4profiles-overlay-v2.2-testtype-fix`
 
-Repository đích: `chuyennova/mihomo-hybrid-windows`.
+SHA-256 nguồn hybrid: `6b6c86a86b830001cb097af95b76301307ee2e09a41c6b81204bd022973bc9bb`
 
-1. Giải nén gói này.
-2. Tải **toàn bộ nội dung bên trong** lên root repository, giữ nguyên đường dẫn.
-3. Giữ nguyên file `mihomo-1.19.29.zip` đang có trong repository; gói này không ghi đè file đó.
-4. Sau khi tải xong, thư mục `.github/workflows` phải có đúng ba workflow mới:
-   - `auto-check.yml`
-   - `build-tag.yml`
-   - `test-baseline.yml`
-5. Xóa workflow cũ khác nếu nó build cố định toàn bộ v1.19.29, để tránh chạy nhầm.
+Đây là **overlay auto-builder**, không chứa toàn bộ source Mihomo và không chứa
+EXE/DLL build sẵn.
 
-Cấu trúc chính:
+## Baseline mới
+
+- Upstream known-good: `v1.19.30`
+- Hybrid logic: `v2.2 testtype-fix`
+- Auto patch revision: `hybrid-4profiles-v11930-v2.2-auto-r1`
+- Build: Windows amd64, `GOAMD64=v2`
+- Go toolchain: MetaCubeX Go `1.26`
+- Wintun: `0.14.1`
+
+## 4 profile giữ nguyên
+
+```yaml
+network-profile: windows
+network-profile: macos
+network-profile: linux
+network-profile: android
+```
+
+Không khai báo `network-profile` thì giữ nguyên đường `ip-stack` upstream
+`auto|gvisor|mips`.
+
+MTU:
+
+- android: mặc định 1360 nếu YAML không khai báo;
+- windows / macos / linux / upstream default: 1408;
+- YAML có `mtu`: luôn dùng đúng giá trị YAML.
+
+## Cách đưa lên GitHub
+
+Repository đích hiện tại:
+
+`chuyennova/mihomo-hybrid-windows`
+
+1. Giải nén ZIP auto-builder.
+2. Upload **toàn bộ nội dung bên trong** vào root repository.
+3. Cho phép ghi đè `.github/workflows`, `scripts`, `README_VI.md`,
+   `VALIDATION_REPORT.md`, `MANIFEST-SHA256.txt`.
+4. Thư mục cũ `overlay/hybrid-v6` và file `mihomo-1.19.29.zip` có thể giữ lại;
+   workflow mới **không dùng chúng**.
+5. Workflow mới dùng:
+   `overlay/hybrid-v11930-v2.2`.
+
+Sau upload, root phải có:
 
 ```text
 .github/workflows/
-overlay/hybrid-v6/
+  auto-check.yml
+  build-tag.yml
+  test-baseline.yml
+
+overlay/
+  hybrid-v11930-v2.2/
+    BASELINE_TAG
+    PATCH_REVISION
+    patches/
+    module-lock/
+    tools/hybrid/
+
 scripts/
 README_VI.md
 VALIDATION_REPORT.md
 MANIFEST-SHA256.txt
 ```
 
-## Hành vi sau khi upload
+## Test ngay v1.19.30 mà không tạo Release
 
-Upload/commit **không tự build lại v1.19.29**, vì workflow không có trigger `push`. Workflow lịch chỉ kiểm tra stable tag mới hơn `v1.19.29`.
+Vào:
 
-Mỗi hai ngày, `auto-check.yml`:
+`Actions -> Test known-good v1.19.30 hybrid baseline -> Run workflow`
 
-```text
-Đọc latest stable Release của MetaCubeX/mihomo
-→ xác nhận tag dạng vX.Y.Z
-→ bỏ qua nếu tag <= v1.19.29
-→ bỏ qua nếu Release hybrid đã tồn tại
-→ bỏ qua nếu tag đang có Issue auto-build-failed
-→ chỉ khi có tag mới thì gọi build-tag.yml
-```
+Hoặc:
 
-`build-tag.yml` tự tải toàn bộ source đúng tag từ `MetaCubeX/mihomo` vào runner tạm thời, rồi:
+`Actions -> Build exact Mihomo tag — hybrid 4 profiles v1.19.30+ v2.2`
+
+với:
 
 ```text
-áp core patch tối thiểu bằng git apply --3way
-→ thêm đúng hai module Windows, không chép đè go.mod/go.sum cũ
-→ go mod tidy + vendor
-→ áp patch sing-wireguard/gVisor dạng exact-match
-→ verify 4 profile và chạy targeted tests
-→ build verge-mihomo.exe
-→ tải Wintun 0.14.1 và xác minh SHA-256
-→ kiểm tra PE AMD64
-→ chạy Windows smoke test: nạp wintun.dll và verge-mihomo.exe -v
-→ chỉ khi tất cả PASS mới tạo GitHub Release
+upstream_tag: v1.19.30
+release_revision: baseline-test
+publish_release: false
 ```
 
-Mỗi Release chứa:
+Kết quả mong muốn:
+
+```text
+Patch, audit, test and compile        PASS
+Windows DLL and executable smoke     PASS
+Publish GitHub Release               SKIPPED
+```
+
+Candidate chỉ là Actions Artifact tạm 1 ngày.
+
+## Auto sau này
+
+`auto-check.yml` kiểm tra stable Release chính thức mỗi 2 ngày.
+
+Nếu latest stable > `v1.19.30` và:
+
+- chưa có Release hybrid tương ứng;
+- không có Issue `auto-build-failed` cho tag đó;
+
+thì workflow tự gọi `build-tag.yml`.
+
+Luồng:
+
+```text
+MetaCubeX stable tag mới
+-> checkout chính xác tag
+-> compatibility gate
+-> git apply --3way core patch
+-> chuẩn bị module graph an toàn
+-> vendor
+-> kiểm tra hash source dependency
+-> áp vendor overlay v2.2
+-> profile audit IPv4/IPv6
+-> targeted tests
+-> build verge-mihomo.exe
+-> tải + verify wintun.dll
+-> PE AMD64 smoke
+-> Windows NativeLibrary.Load + verge-mihomo.exe -v
+-> PASS thì mới tạo GitHub Release
+```
+
+## Khi upstream thay đổi cấu trúc
+
+Auto-builder **không ép patch cũ bằng mọi giá**.
+
+Nếu core WireGuard hoặc gVisor/sing-wireguard thay đổi không còn tương thích:
+
+```text
+FAIL
+-> không tạo Release
+-> giữ Release cũ
+-> upload build-logs
+-> mở một Issue auto-build-failed
+-> những lần check sau bỏ qua tag lỗi
+```
+
+Sau khi sửa overlay, chạy manual đúng tag lỗi. Build thành công sẽ đóng Issue.
+
+## Log luôn tải được khi build lỗi
+
+Build job luôn chạy bước finalize/upload log bằng `if: always()`.
+
+Artifact:
+
+```text
+build-logs-<tag>-<run-id>-attempt-<n>
+```
+
+chứa:
+
+```text
+summary.txt
+summary.json
+full-build.log
+steps/
+diagnostics/
+source-logs/
+downloadable-logs.zip
+```
+
+Windows smoke và Release cũng có artifact log riêng.
+
+## File Release
+
+Chỉ khi toàn bộ gate PASS:
 
 ```text
 verge-mihomo.exe
@@ -66,43 +185,3 @@ SHA256SUMS.txt
 build-info.json
 verge-mihomo-vX.Y.Z-hybrid-windows-amd64.zip
 ```
-
-## Khi build lỗi
-
-Không tạo Release và không ảnh hưởng bản thành công cũ. Workflow vẫn dùng `if: always()` để upload artifact log giữ 7 ngày:
-
-```text
-summary.txt
-summary.json
-full-build.log
-steps/*.log
-diagnostics/*
-downloadable-logs.zip
-```
-
-Một Issue `auto-build-failed` duy nhất được tạo cho tag lỗi. Các lần kiểm tra lịch sau bỏ qua tag đó, tránh build lặp và tốn GitHub Actions. Sau khi sửa overlay, chạy thủ công `Build exact Mihomo tag — hybrid 4 profiles` với đúng tag lỗi; khi thành công Issue được đóng.
-
-## Build thủ công
-
-Vào **Actions → Build exact Mihomo tag — hybrid 4 profiles → Run workflow**, nhập một stable tag chính xác. Không cần Personal Access Token; workflow dùng `GITHUB_TOKEN` với quyền trong repository.
-
-## Sửa lỗi Go 1.20 của bản r1
-
-Run thử `v1.19.29` số `30763035640` cho thấy bản r1 đã đọc `go 1.20` từ upstream `go.mod`, khiến dependency mới báo thiếu `slices` và `crypto/sha3`. Bản r2 khóa đúng MetaCubeX Go `1.26`, giống workflow overlay v6 đã từng build thành công, đồng thời kiểm tra thực tế `go version` trước khi tiếp tục.
-
-Sau khi upload bản r2, chạy thử thủ công:
-
-```text
-upstream_tag: v1.19.29
-release_revision: test-r2
-publish_release: false
-```
-
-## Mốc kiểm tra
-
-- Overlay nguồn đã nhận: `mihomo-v1.19.29-hybrid-4profiles-overlay-v6-buildtags-fix(4).zip`
-- SHA-256 overlay nguồn: `974a71fe1ef4aa8872c197fafd93115a6aeccf9f174148dc89bcdf3dc03092af`
-- Core patch SHA-256: `7ce5f7a7b481dced7d77ba759694aa76e39b693a2bc9af32b341af4a0072c922`
-- Baseline core: upstream tag `v1.19.29`
-- Go toolchain: MetaCubeX Go `1.26` (không đọc `go-version` từ upstream `go.mod`)
-- Patch revision: `hybrid-4profiles-v6-auto-r2-go126`
